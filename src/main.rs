@@ -1,9 +1,20 @@
 //use std::io::BufReader;
-use std::{fs::File, thread, time, sync::{Mutex, Arc}, result, fmt};
+use std::{fs::File, thread, time, sync::{Mutex, Arc}, fmt, collections::HashMap, rc::Rc, borrow::Borrow};
 
-use rodio::{Decoder, OutputStream, source::Source, OutputStreamHandle, Sink, dynamic_mixer};
+use rodio::{Decoder, OutputStream, source::Source, OutputStreamHandle, Sink, dynamic_mixer, decoder::DecoderError};
 use inputbot::KeybdKey;
 
+pub mod fake_database;
+
+use fake_database::FakeDatabase::{self, SongHttpResponse, sample_response};
+
+
+// transfer to Mode module (keyboardActivity)
+const CALM_AVERAGE: f32 = 0.15;
+const NORMAL_AVERAGE: f32 = 0.25;
+const ASCENDENT_AVERAGE: f32 = 0.50;
+const FLOW_AVERAGE: f32 = 0.65;
+const INTENSE_AVERAGE: f32 = 0.80;
 
 enum Mode {
     Intense(f32, Sink), // insane!
@@ -11,6 +22,30 @@ enum Mode {
     Ascendent(f32, Sink), // growing rythm
     Normal(f32, Sink), // nothing happens
     Calm(f32, Sink) // lazy rythm
+}
+
+#[derive(Eq, Hash, PartialEq)]
+enum FakeMode {
+    Intense, // insane!
+    Flow, // perfect state
+    Ascendent, // growing rythm
+    Normal, // nothing happens
+    Calm // lazy rythm
+}
+
+struct StructuredMode {
+    label: Mode,
+    samples: Vec<sample_response::Sample>,
+    average_target: f32,
+    keyboard_activity: (),
+    emotion_recognition: ()
+}
+
+impl StructuredMode {
+
+    fn set_sample(&mut self, samples: Vec<sample_response::Sample>) {
+        self.samples = samples;
+    }
 }
 
 impl fmt::Debug for Mode {
@@ -36,23 +71,23 @@ impl Mode {
             Mode::Flow(_, audio_track) => {
                 audio_track.pause();
                 //new_sink.append(Decoder::new(self.get_source()).unwrap());
-                Result::Ok(Mode::Intense(0.80, new_sink))
+                Result::Ok(Mode::Intense(INTENSE_AVERAGE, new_sink))
             }, 
             Mode::Ascendent(_, audio_track) => {
                 audio_track.pause();
                 //new_sink.append(Decoder::new(self.get_source()).unwrap());
-                Result::Ok(Mode::Flow(0.65, new_sink))
+                Result::Ok(Mode::Flow(FLOW_AVERAGE, new_sink))
             },
             Mode::Normal(_, audio_track) => {
                 audio_track.pause();
                 //new_sink.append(Decoder::new(self.get_source()).unwrap());
                 print!("switching to ascendent");
-                Result::Ok(Mode::Ascendent(0.50, new_sink))
+                Result::Ok(Mode::Ascendent(ASCENDENT_AVERAGE, new_sink))
             },
             Mode::Calm(_t, audio_track) => {
                 audio_track.pause();
                 //new_sink.append(Decoder::new(self.get_source()).unwrap());
-                Result::Ok(Mode::Normal(0.25, new_sink))
+                Result::Ok(Mode::Normal(NORMAL_AVERAGE, new_sink))
             },
         }
     }
@@ -62,22 +97,22 @@ impl Mode {
             Mode::Intense(_, audio_track) => {
                 audio_track.pause();
                 //new_sink.append(Decoder::new(self.get_source()).unwrap());
-                Result::Ok( Mode::Flow(0.65, new_sink))
+                Result::Ok( Mode::Flow(FLOW_AVERAGE, new_sink))
             }, 
             Mode::Flow(_, audio_track) => {
                 audio_track.pause();
                 //new_sink.append(Decoder::new(self.get_source()).unwrap());
-                Result::Ok(Mode::Ascendent(0.50, new_sink))
+                Result::Ok(Mode::Ascendent(ASCENDENT_AVERAGE, new_sink))
             },
             Mode::Ascendent(_, audio_track) => {
                 audio_track.pause();
                 //new_sink.append(Decoder::new(self.get_source()).unwrap());
-                Result::Ok(Mode::Normal(0.25, new_sink))
+                Result::Ok(Mode::Normal(NORMAL_AVERAGE, new_sink))
             },
             Mode::Normal(_, audio_track) => {
                 audio_track.pause();
                 //new_sink.append(Decoder::new(self.get_source()).unwrap());
-                Result::Ok(Mode::Calm(0.15, new_sink))
+                Result::Ok(Mode::Calm(CALM_AVERAGE, new_sink))
             },
             Mode::Calm(_, _) => Result::Err(())
         }
@@ -134,19 +169,19 @@ impl Timeline {
     }
 }
 
-struct Spiderphonic {
-    audio_manager: AudioManager,
+struct Spiderphonic<'a> {
+    audio_manager: AudioManager<'a>,
     time_line: Timeline,
     initial_checkpoint: std::time::SystemTime,
     last_checkpoint: std::time::SystemTime,
     mode: Mode,
 }
 
-impl Spiderphonic {
+impl Spiderphonic<'_> {
 
     fn new(mut audio_manager: AudioManager) -> Self {
-        let initial_mode = Mode::Normal(0.25, audio_manager.create_sink()); 
-        
+        let initial_mode = Mode::Normal(0.25, audio_manager.create_sink());
+                
         audio_manager.set_audio(&initial_mode);
         audio_manager.play(&initial_mode);
         
@@ -195,20 +230,47 @@ impl Spiderphonic {
     }
 }
 
-struct AudioManager {
+struct AudioManager<'a> {
     stream: OutputStream,
     stream_handle: OutputStreamHandle,
+    song: SongHttpResponse, // keep original song
+    splitted_song: HashMap<FakeMode, Vec<&'a sample_response::Sample>> // Mode is only an enum with no informations
 }
 
-unsafe impl Send for AudioManager {}
+unsafe impl Send for AudioManager<'_> {}
 
-impl AudioManager {
-    fn new() -> Self {
+impl AudioManager<'_> {
+    fn new(song: SongHttpResponse) -> Self {
         let (stream, stream_handle) = OutputStream::try_default().unwrap();
-      
+
+        let mut splitted_song: HashMap<FakeMode, Vec<&sample_response::Sample>> = HashMap::new();
+        let samples = Rc::from(&song);
+        
+        for sample in samples.borrow() {
+            let key = if sample.sequence < 1.0 {
+                FakeMode::Calm
+            } else if sample.sequence >= 1.0 {
+                FakeMode::Normal
+            } else if sample.sequence >= 2.0 {
+                FakeMode::Ascendent
+            } else if sample.sequence >= 3.0 {
+                FakeMode::Flow
+            } else {
+                FakeMode::Intense
+            };
+            
+            splitted_song.entry(key).and_modify(move |samples| {
+                samples.push(sample)
+            }).or_insert(Vec::new());
+        }
+
+        drop(samples);
+
         Self {
             stream,
-            stream_handle
+            stream_handle,
+            song,
+            splitted_song
         }
     }
 
@@ -220,6 +282,10 @@ impl AudioManager {
         let (_, sink) = mode.custom_unwrap();
         sink.append(Decoder::new(mode.get_source()).unwrap());
     }
+
+    // fn create_decoder<R>(source: File) -> Result<Decoder<R>, DecoderError> {
+    //     Ok(Decoder::new(source).unwrap())
+    // }
 
     fn play(&mut self, mode: &Mode) { // can improve this repetitive code
         match mode {
@@ -249,8 +315,11 @@ impl AudioManager {
     }
 }
 
-fn main() {   
-    let spiderphonic = Spiderphonic::new(AudioManager::new());
+fn main() {
+   
+    let song = FakeDatabase::SongHttpResponse::get();
+    
+    let spiderphonic = Spiderphonic::new(AudioManager::new(song));
 
     let observer = Arc::new(Mutex::new(spiderphonic));
     
@@ -278,7 +347,3 @@ fn main() {
 }
 
 
-struct Sample {
-    _path: String,
-    _phase: String,
-}
