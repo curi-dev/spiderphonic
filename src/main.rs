@@ -1,7 +1,7 @@
 //use std::io::BufReader;
-use std::{fs::File, thread, time, sync::{Mutex, Arc}, fmt, collections::HashMap, rc::Rc, borrow::Borrow};
+use std::{fs::File, thread, time, sync::{Mutex, Arc}, fmt, collections::HashMap, rc::Rc, borrow::{Borrow, BorrowMut}};
 
-use rodio::{Decoder, OutputStream, source::Source, OutputStreamHandle, Sink, dynamic_mixer, decoder::DecoderError};
+use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink};
 use inputbot::KeybdKey;
 
 pub mod fake_database;
@@ -41,13 +41,6 @@ struct StructuredMode {
     emotion_recognition: ()
 }
 
-impl StructuredMode {
-
-    fn set_sample(&mut self, samples: Vec<sample_response::Sample>) {
-        self.samples = samples;
-    }
-}
-
 impl fmt::Debug for Mode {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "Hi")
@@ -81,7 +74,6 @@ impl Mode {
             Mode::Normal(_, audio_track) => {
                 audio_track.pause();
                 //new_sink.append(Decoder::new(self.get_source()).unwrap());
-                print!("switching to ascendent");
                 Result::Ok(Mode::Ascendent(ASCENDENT_AVERAGE, new_sink))
             },
             Mode::Calm(_t, audio_track) => {
@@ -169,15 +161,15 @@ impl Timeline {
     }
 }
 
-struct Spiderphonic<'a> {
-    audio_manager: AudioManager<'a>,
+struct Spiderphonic {
+    audio_manager: AudioManager,
     time_line: Timeline,
     initial_checkpoint: std::time::SystemTime,
     last_checkpoint: std::time::SystemTime,
     mode: Mode,
 }
 
-impl Spiderphonic<'_> {
+impl Spiderphonic {
 
     fn new(mut audio_manager: AudioManager) -> Self {
         let initial_mode = Mode::Normal(0.25, audio_manager.create_sink());
@@ -195,28 +187,37 @@ impl Spiderphonic<'_> {
         }
     }
 
-    fn get_initial_checkpoint(&self) -> u64 {
+    fn elapsed_time_from_start(&self) -> u64 {
         self.initial_checkpoint.elapsed().unwrap().as_secs()
     }
 
-    fn elapsed_time(&self) -> u64 {
+    fn elapsed_time_from_last(&self) -> u64 {
         self.last_checkpoint.elapsed().unwrap().as_secs()
     }
 
+
     fn update_calculations(&mut self) {
-        let elapsed_time = self.elapsed_time();
-        let arithmetic_average = self.time_line.calculate_arithmetic_average(elapsed_time); // make conditionally after 90 seconds
+        let elapsed_time_from_last = self.elapsed_time_from_last();
+        let elapsed_time_from_start = self.elapsed_time_from_start();
+        let arithmetic_average_from_last = self.time_line.calculate_arithmetic_average(elapsed_time_from_last); 
+        let arithmetic_average_from_start = self.time_line.calculate_arithmetic_average(elapsed_time_from_start); 
 
         let (average_target, _) = self.mode.custom_unwrap();
         let min_to_switch = 10;
-        if (elapsed_time >= min_to_switch) && (arithmetic_average >= average_target) { // what about decreasing effect? 90 seconds is the right time
-            let result = self.mode.get_one_after(self.audio_manager.create_sink());          
-            if result.is_ok() {
-                println!("\nincreasing mode...{}", arithmetic_average);
-                self.last_checkpoint = time::SystemTime::now();        
-                self.mode = result.unwrap();
-                self.audio_manager.play(&self.mode);
+        if (elapsed_time_from_last >= min_to_switch) && (arithmetic_average_from_last >= average_target) { 
+            let total_average_target = (average_target / 15.0) * 100.0; // 25% less than short period
+            if arithmetic_average_from_start >= total_average_target {
+                let result = self.mode.get_one_after(self.audio_manager.create_sink());          
+                if result.is_ok() {
+                    println!("\nincreasing mode...");
+                    self.last_checkpoint = time::SystemTime::now();        
+                    self.mode = result.unwrap();
+                    self.audio_manager.play(&self.mode);
+                }
+            } else {
+                println!("change rithm")
             }
+            
         }
     }
 
@@ -230,23 +231,22 @@ impl Spiderphonic<'_> {
     }
 }
 
-struct AudioManager<'a> {
+struct AudioManager {
     stream: OutputStream,
     stream_handle: OutputStreamHandle,
-    song: SongHttpResponse, // keep original song
-    splitted_song: HashMap<FakeMode, Vec<&'a sample_response::Sample>> // Mode is only an enum with no informations
+    splitted_song: HashMap<FakeMode, Vec<sample_response::Sample>>,
+    sinks: Vec<Sink>
 }
 
-unsafe impl Send for AudioManager<'_> {}
+unsafe impl Send for AudioManager {}
 
-impl AudioManager<'_> {
+impl AudioManager {
     fn new(song: SongHttpResponse) -> Self {
         let (stream, stream_handle) = OutputStream::try_default().unwrap();
 
-        let mut splitted_song: HashMap<FakeMode, Vec<&sample_response::Sample>> = HashMap::new();
-        let samples = Rc::from(&song);
-        
-        for sample in samples.borrow() {
+        let mut splitted_song: HashMap<FakeMode, Vec<sample_response::Sample>> = HashMap::new();
+             
+        for sample in song.samples {
             let key = if sample.sequence < 1.0 {
                 FakeMode::Calm
             } else if sample.sequence >= 1.0 {
@@ -264,13 +264,15 @@ impl AudioManager<'_> {
             }).or_insert(Vec::new());
         }
 
-        drop(samples);
-
+        for (_value, samples) in splitted_song.iter_mut() {
+            samples.sort_by(|a, b| b.sequence.total_cmp(&a.sequence));
+        };
+              
         Self {
             stream,
             stream_handle,
-            song,
-            splitted_song
+            splitted_song,
+            sinks: Vec::new()
         }
     }
 
@@ -283,9 +285,44 @@ impl AudioManager<'_> {
         sink.append(Decoder::new(mode.get_source()).unwrap());
     }
 
-    // fn create_decoder<R>(source: File) -> Result<Decoder<R>, DecoderError> {
-    //     Ok(Decoder::new(source).unwrap())
-    // }
+    fn play_mix(&mut self, mode: &FakeMode) {
+        // get the samples from the active mode
+        let samples = self.splitted_song.get(mode).unwrap();
+
+        // create a new sink
+        let new_sink = self.create_sink();
+
+        // get the next using the last
+        let last_added =  self.sinks.last();
+
+        if last_added.is_some() {
+            
+        } else {
+            println!("first sample of all");
+        }
+
+        let path = &samples.get(0).unwrap().path;
+
+        let source = Decoder::new(File::open(path).unwrap()).unwrap();
+
+        new_sink.append(source);
+        new_sink.play();
+
+        self.sinks.push(new_sink);
+    }
+
+    fn mix_song(&mut self, mode: &FakeMode) {
+        let samples = self.splitted_song.get(mode).unwrap();
+
+        let new_sink = self.create_sink();
+
+        let path = &samples.get(0).unwrap().path;
+
+        let source = Decoder::new(File::open(path).unwrap()).unwrap();
+
+        new_sink.append(source);
+        new_sink.play();
+    }
 
     fn play(&mut self, mode: &Mode) { // can improve this repetitive code
         match mode {
@@ -333,7 +370,7 @@ fn main() {
         let mut count = 1;
         
         loop {
-            let total_elapsed_time = mutex_observer_for_calculations.lock().unwrap().get_initial_checkpoint();
+            let total_elapsed_time = mutex_observer_for_calculations.lock().unwrap().elapsed_time_from_start();
             if total_elapsed_time >= count {
                 mutex_observer_for_calculations.lock().unwrap().update_calculations(); 
                 count += 1;
