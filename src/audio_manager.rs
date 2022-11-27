@@ -1,5 +1,5 @@
  
- mod AudioManager {
+ mod audio_manager {
     struct AudioManager {
         stream: OutputStream,
         stream_handle: OutputStreamHandle,

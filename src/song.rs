@@ -1,5 +1,5 @@
 
-mod Song {
+mod song {
     struct SongMetadata {
         information: String
     }

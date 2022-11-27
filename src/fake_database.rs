@@ -1,6 +1,6 @@
-//use std::fmt::Debug;
+pub mod fake_database {
+    use std::fs::File;
 
-pub mod FakeDatabase {
     use self::sample_response::{Sample, Instrument};
 
     pub struct SongHttpResponse {
@@ -21,34 +21,42 @@ pub mod FakeDatabase {
                 average_bpm: 107, // ceil average
                 samples: vec![
                     Sample { 
-                        path: String::from("mocks/samples/drums/THE_KOUNT_94_percussion_loop_electric_tom_groove.wav"), 
+                        id: 0,
+                        path: String::from("src/samples/drums/THE_KOUNT_94_percussion_loop_electric_tom_groove.wav"), 
                         bpm: 94, 
                         instrument: Instrument::Drum,
                         modular: false,
+                        binded_samples: vec![1],
                         sequence: 1.0,
                         comments: String::from("") 
                     },
                     Sample { 
-                        path: String::from("mocks/samples/drums/MALAY_115_drum_loop_upbeat.wav"), 
+                        id: 1,
+                        path: String::from("src/samples/drums/MALAY_115_drum_loop_upbeat.wav"), 
                         bpm: 115, 
                         instrument: Instrument::Drum, 
                         modular: false,
+                        binded_samples: vec![0],
                         sequence: 1.1,
                         comments: String::from("") 
                     },
                     Sample { 
-                        path: String::from("mocks/samples/drums/MALAY_115_drum_loop_upbeat_lofi.wav"), 
+                        id: 2,
+                        path: String::from("src/samples/drums/MALAY_115_drum_loop_upbeat_lofi.wav"), 
                         bpm: 115, 
                         instrument: Instrument::Drum,
                         modular: true,
+                        binded_samples: vec![1],
                         sequence: 2.0,
                         comments: String::from("") 
                     },
                     Sample { 
-                        path: String::from("mocks/samples/vocals/CLF_105_Vocal_Alana_Am.wav"), 
+                        id: 3,
+                        path: String::from("src/samples/vocals/CLF_105_Vocal_Alana_Am.mp3"), 
                         bpm: 105, 
                         instrument: Instrument::Vocal, 
                         modular: true,
+                        binded_samples: vec![2],
                         sequence: 2.1,
                         comments: String::from("") 
                     },
@@ -74,10 +82,12 @@ pub mod FakeDatabase {
 
     pub mod sample_response {
         pub struct Sample {
+            pub id: usize,
             pub path: String,
             pub bpm: u32, // it is enough?
             pub instrument: Instrument,
             pub modular: bool,
+            pub binded_samples: Vec<usize>,
             pub sequence: f32,
             pub comments: String
         }

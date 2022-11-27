@@ -1,6 +1,5 @@
 
-
-mod Spiderphonic {
+mod spiderphonic {
     struct Spiderphonic {
         audio_manager: AudioManager,
         time_line: Timeline,
